@@ -13,6 +13,15 @@ export function rectsIntersect(a: RectF, b: RectF): boolean {
   return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
 }
 
+/** Discrete things that happened this tick, drained by the world to spawn visual effects. */
+export type PlayerEvent =
+  | { type: 'jump' }
+  | { type: 'land'; impact: number }
+  | { type: 'dash' }
+  | { type: 'attack' }
+  | { type: 'heavy' }
+  | { type: 'blockDeflect' }
+
 /**
  * Controller connecting player physics, state machine, and SpriteAnimationSystem.
  * Decoupled from input mechanisms (touch, joystick, keyboard).
@@ -55,6 +64,17 @@ export class PlayerController {
   /** Attacks whose hit window has already fired, so one swing hits at most once. */
   private readonly hitWindowConsumed = new Set<PlayerAction>()
 
+  /** Effect events since the world last drained them (capped so an undrained queue cannot grow). */
+  readonly events: PlayerEvent[] = []
+
+  private emit(e: PlayerEvent): void {
+    if (this.events.length < 32) this.events.push(e)
+  }
+
+  get isDashing(): boolean {
+    return this.dashTimer > 0
+  }
+
   // Input buffer
   private inputMoveX = 0
   private isBlockInputActive = false
@@ -88,6 +108,7 @@ export class PlayerController {
     this.vy = this.jumpImpulse
     this.isGrounded = false
     this.animationSystem.playAction(PlayerAction.JUMP)
+    this.emit({ type: 'jump' })
     return true
   }
 
@@ -97,6 +118,7 @@ export class PlayerController {
     this.dashTimer = this.dashDuration
     this.isInvulnerable = true
     this.animationSystem.playAction(PlayerAction.DASH, true)
+    this.emit({ type: 'dash' })
     return true
   }
 
@@ -104,7 +126,10 @@ export class PlayerController {
     if (this.dashTimer > 0 || !this.isGrounded) return false
     this.hitWindowConsumed.delete(PlayerAction.ATTACK)
     const switched = this.animationSystem.playAction(PlayerAction.ATTACK, true)
-    if (switched) this.vx = this.isFacingRight ? 40 : -40 // slight forward lunge
+    if (switched) {
+      this.vx = this.isFacingRight ? 40 : -40 // slight forward lunge
+      this.emit({ type: 'attack' })
+    }
     return switched
   }
 
@@ -113,7 +138,10 @@ export class PlayerController {
     this.stamina -= 20
     this.hitWindowConsumed.delete(PlayerAction.HEAVY_ATTACK)
     const switched = this.animationSystem.playAction(PlayerAction.HEAVY_ATTACK, true)
-    if (switched) this.vx = 0
+    if (switched) {
+      this.vx = 0
+      this.emit({ type: 'heavy' })
+    }
     return switched
   }
 
@@ -123,6 +151,7 @@ export class PlayerController {
       // Block deflecting
       this.stamina -= 15
       this.hp -= Math.trunc(damage * 0.2)
+      this.emit({ type: 'blockDeflect' })
       return false // Deflected!
     }
     this.hp = Math.max(0, this.hp - damage)
@@ -146,6 +175,7 @@ export class PlayerController {
     this.dashTimer = 0
     this.isInvulnerable = false
     this.isBlocking = false
+    this.events.length = 0 // a reset must not replay effects from before it
     this.animationSystem.playAction(PlayerAction.IDLE, true)
   }
 
@@ -184,6 +214,7 @@ export class PlayerController {
       this.groundY += this.vy * dt
       if (this.groundY >= floorY) {
         this.groundY = floorY
+        this.emit({ type: 'land', impact: this.vy })
         this.vy = 0
         this.isGrounded = true
       }

@@ -204,4 +204,59 @@ export class SpriteAnimationSystem {
     ctx.drawImage(sheet.image, sx, sy, sw, sh, left, top, displayWidth, displayHeight)
     ctx.restore()
   }
+
+  private tintCanvas: HTMLCanvasElement | null = null
+
+  /**
+   * Draws an arbitrary frame of an action (not just the current one), optionally
+   * flat-tinted. Used for dash afterimages, which must show the pose the knight
+   * actually had a moment ago. A no-op where no DOM canvas exists (unit tests).
+   */
+  renderFrame(
+    ctx: CanvasRenderingContext2D,
+    action: PlayerAction,
+    frameIndex: number,
+    centerX: number,
+    bottomY: number,
+    size: number,
+    isFacingRight: boolean,
+    tint: string | null = null,
+  ): void {
+    // Same fallback as render(): an action with no art of its own shows the idle pose.
+    const sheet = this.sheets.get(action) ?? this.sheets.get(PlayerAction.IDLE)
+    if (!sheet) return
+    const { sx, sy, sw, sh } = sheet.frameRect(frameIndex)
+
+    let source: CanvasImageSource = sheet.image
+    let ssx = sx
+    let ssy = sy
+    if (tint) {
+      if (typeof document === 'undefined') return
+      const c = (this.tintCanvas ??= document.createElement('canvas'))
+      if (c.width !== sw || c.height !== sh) {
+        c.width = sw
+        c.height = sh
+      }
+      const t = c.getContext('2d')
+      if (!t) return
+      t.clearRect(0, 0, sw, sh)
+      t.globalCompositeOperation = 'source-over'
+      t.drawImage(sheet.image, sx, sy, sw, sh, 0, 0, sw, sh)
+      t.globalCompositeOperation = 'source-atop'
+      t.fillStyle = tint
+      t.fillRect(0, 0, sw, sh)
+      source = c
+      ssx = 0
+      ssy = 0
+    }
+
+    ctx.save()
+    if (!isFacingRight) {
+      ctx.translate(centerX, bottomY)
+      ctx.scale(-1, 1)
+      ctx.translate(-centerX, -bottomY)
+    }
+    ctx.drawImage(source, ssx, ssy, sw, sh, centerX - size / 2, bottomY - size, size, size)
+    ctx.restore()
+  }
 }

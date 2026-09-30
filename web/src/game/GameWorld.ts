@@ -1,5 +1,6 @@
+import { EffectsSystem } from './EffectsSystem'
 import { DamageText, SparkParticle, TrainingDummy } from './CombatEntity'
-import { PlayerController, rectsIntersect } from './PlayerController'
+import { PlayerController, rectsIntersect, type PlayerEvent } from './PlayerController'
 import type { SpriteAnimationSystem } from './SpriteAnimationSystem'
 import { DEFAULT_FOOT_ROW, footOffsetForRow } from './spriteMetrics'
 
@@ -111,6 +112,7 @@ export class GameWorld {
   readonly dummies: TrainingDummy[]
   readonly damageTexts: DamageText[] = []
   readonly particles: SparkParticle[] = []
+  readonly effects = new EffectsSystem()
 
   private background: LoadedImage | null = null
 
@@ -151,8 +153,13 @@ export class GameWorld {
   update(dt: number): void {
     const clampedDt = Math.min(0.05, Math.max(0.001, dt))
 
+    // Effects run on real time; hit-stop freezes only the simulation below.
+    this.effects.update(clampedDt)
+    if (this.effects.drainHitStop(clampedDt)) return
+
     // Update player
     this.player.update(clampedDt, 0, GameWorld.WORLD_WIDTH, GameWorld.FLOOR_Y)
+    this.spawnPlayerEffects(clampedDt)
 
     // Camera smoothly follows player within world bounds
     const targetCamX = Math.min(
@@ -163,9 +170,11 @@ export class GameWorld {
 
     // Check attack collisions
     if (this.player.shouldCheckAttackHit()) {
+      this.effects.swing(this.anchor(), false)
       this.performAttackHitCheck(18, false)
     }
     if (this.player.shouldCheckHeavyAttackHit()) {
+      this.effects.swing(this.anchor(), true)
       this.performAttackHitCheck(45, true)
     }
 
@@ -182,12 +191,62 @@ export class GameWorld {
     }
   }
 
+  private anchor() {
+    return {
+      x: this.player.x,
+      groundY: this.player.groundY,
+      height: this.player.height,
+      facing: (this.player.isFacingRight ? 1 : -1) as 1 | -1,
+    }
+  }
+
+  /** Turns the player's discrete events (and dash trail) into visual effects. */
+  private spawnPlayerEffects(dt: number): void {
+    const a = this.anchor()
+    const events: PlayerEvent[] = this.player.events.splice(0)
+    for (const e of events) {
+      switch (e.type) {
+        case 'jump':
+          this.effects.jump(a)
+          break
+        case 'land':
+          this.effects.land(a, e.impact)
+          break
+        case 'dash':
+          this.effects.dash(a)
+          break
+        case 'attack':
+          this.effects.attackStart(a)
+          break
+        case 'heavy':
+          this.effects.heavyStart(a)
+          break
+        case 'blockDeflect':
+          this.effects.blockDeflect(a)
+          break
+      }
+    }
+
+    if (this.player.isDashing) {
+      const size = this.animationSystem.displaySizeForCurrentSheet(GameWorld.SPRITE_DISPLAY_SIZE)
+      this.effects.dashTrail(dt, {
+        action: this.animationSystem.currentAction,
+        frame: this.animationSystem.currentFrameIndex,
+        x: this.player.x,
+        bottomY: this.player.groundY + this.animationSystem.footOffsetForCurrentFrame(GameWorld.SPRITE_DISPLAY_SIZE),
+        size,
+        facingRight: this.player.isFacingRight,
+      })
+    }
+  }
+
   private performAttackHitCheck(damage: number, isHeavy: boolean): void {
     const atkBox = this.player.attackHitbox
     for (const dummy of this.dummies) {
       if (!rectsIntersect(atkBox, dummy.hitbox)) continue
 
       dummy.takeDamage(damage)
+      this.effects.hit(dummy.x, dummy.groundY - dummy.height / 2, this.player.isFacingRight ? 1 : -1, isHeavy)
 
       // Spawn floating damage text
       const dColor = isHeavy ? 'rgb(255, 180, 50)' : 'rgb(240, 240, 255)'
@@ -270,6 +329,16 @@ export class GameWorld {
   /** Renders the game world. The ctx is already in logical coordinates. */
   render(ctx: CanvasRenderingContext2D): void {
     ctx.save()
+    // Screen shake, with a tiny overscan so the backdrop edge never shows a gap.
+    const fx = this.effects
+    if (fx.shakeX !== 0 || fx.shakeY !== 0) {
+      const w = GameWorld.LOGICAL_WIDTH
+      const h = GameWorld.LOGICAL_HEIGHT
+      const k = 1 + (Math.abs(fx.shakeX) + Math.abs(fx.shakeY)) * 2 / w
+      ctx.translate(w / 2 + fx.shakeX, h / 2 + fx.shakeY)
+      ctx.scale(k, k)
+      ctx.translate(-w / 2, -h / 2)
+    }
     // Single world -> screen transform. The backdrop, the player, the dummies and
     // every hitbox all live in the same world space, so a world-fixed object stays
     // locked to the dungeon while the player walks.
@@ -304,9 +373,22 @@ export class GameWorld {
     ctx.ellipse(this.player.x, GameWorld.FLOOR_Y + 1, 18, 3, 0, 0, Math.PI * 2)
     ctx.fill()
 
+    // 4b. Floor-level effects (dust rings, shockwaves) sit under the knight.
+    this.effects.renderBehind(ctx)
+
+    // 4c. Dash afterimages, tinted and fading, behind the live sprite.
+    this.effects.forEachGhost((g, alpha) => {
+      ctx.save()
+      ctx.globalAlpha = alpha
+      this.animationSystem.renderFrame(ctx, g.action, g.frame, g.x, g.bottomY, g.size, g.facingRight, 'rgba(110,210,255,0.85)')
+      ctx.restore()
+    })
+
     // 5. Render Character Sprite
     this.renderCharacter(ctx)
 
+    // 5c. Impact bursts, dust and debris over the knight.
+    this.effects.renderFront(ctx)
 
     // 6. Render Particles
     for (const p of this.particles) {
@@ -326,5 +408,8 @@ export class GameWorld {
     }
 
     ctx.restore()
+
+    // Screen-space flash on big hits, in logical coordinates over the whole view.
+    this.effects.renderFlash(ctx, GameWorld.LOGICAL_WIDTH, GameWorld.LOGICAL_HEIGHT)
   }
 }

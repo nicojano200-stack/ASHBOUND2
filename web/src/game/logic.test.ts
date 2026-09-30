@@ -38,6 +38,12 @@ function stubAnimations() {
       return true
     },
     update() {},
+    displaySizeForCurrentSheet(base: number) {
+      return base
+    },
+    footOffsetForCurrentFrame() {
+      return 0
+    },
     getSheet() {
       return undefined
     },
